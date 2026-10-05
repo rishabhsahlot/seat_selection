@@ -34,7 +34,11 @@ public class SecurityConfig {
 		http.csrf(csrf -> csrf.disable())
 				.sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 				.authorizeHttpRequests(auth -> auth
+						.requestMatchers("/actuator/health/**", "/actuator/prometheus", "/actuator/info", "/error")
+						.permitAll()
 						.requestMatchers(HttpMethod.POST, "/auth/token").permitAll()
+						// Admin endpoint: guarded by X-Admin-Key in the controller, not by user tokens.
+						.requestMatchers(HttpMethod.POST, "/shows").permitAll()
 						.anyRequest().authenticated())
 				.oauth2ResourceServer(o -> o.jwt(jwt -> {
 				}).authenticationEntryPoint(jsonError(json, HttpStatus.UNAUTHORIZED, "unauthorized",
