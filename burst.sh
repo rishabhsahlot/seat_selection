@@ -29,7 +29,7 @@ STAMPEDE_USERS=${STAMPEDE_USERS:-1500} # users sending those requests
 ROWS=${ROWS:-20}                       # the hall: ROWS x SEATS_PER_ROW seats (A1 ... T50)
 SEATS_PER_ROW=${SEATS_PER_ROW:-50}
 CONCURRENCY=${CONCURRENCY:-300}        # requests in flight at once
-TIMEOUT=${TIMEOUT:-120}                # seconds per request
+TIMEOUT=${TIMEOUT:-330}                # seconds per request; longer than the service waits for a database connection (300 s)
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/burst.XXXXXX") # scratch files for this run, deleted on exit
 trap 'touch "$WORK/done"; rm -rf "$WORK"' EXIT
@@ -138,7 +138,11 @@ check_ready() {
 	curl -sf --max-time 30 "$BASE/actuator/health/readiness" >/dev/null || fail "$BASE is not ready"
 	local status
 	status=$(fetch_metrics "$WORK/metrics.before")
-	[ "$status" = 401 ] && fail "/actuator/prometheus needs credentials: set METRICS_USERNAME and METRICS_PASSWORD"
+	if [ "$status" = 401 ] && [ -z "$METRICS_PASSWORD" ]; then
+		fail "/actuator/prometheus needs credentials: set METRICS_USERNAME and METRICS_PASSWORD"
+	elif [ "$status" = 401 ]; then
+		fail "/actuator/prometheus rejected user '$METRICS_USERNAME': check METRICS_USERNAME and METRICS_PASSWORD match the service"
+	fi
 	[ "$status" = 200 ] || fail "could not read /actuator/prometheus (HTTP $status)"
 }
 

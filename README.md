@@ -147,13 +147,47 @@ ADMIN_API_KEY=<the service's admin key> ./burst.sh https://paytm-seat-selection.
   | `RETRY_KEYS` / `RETRY_FANOUT` | `50` / `20` | Retried requests, and copies of each |
   | `STAMPEDE` / `STAMPEDE_USERS` | `15000` / `1500` | Other requests, and the users sending them |
   | `ROWS` / `SEATS_PER_ROW` | `20` / `50` | The hall size |
-  | `TIMEOUT` | `120` | Seconds per request |
+  | `TIMEOUT` | `330` | Seconds per request; longer than the service's 5-minute wait for a database connection, so the client never gives up first |
 
 - **Against the live free instance,** use a smaller run. It has a fraction of one CPU, so 300 requests at once mostly measures queueing:
   ```bash
   ADMIN_API_KEY=<key> METRICS_USERNAME=<user> METRICS_PASSWORD=<password> \
     CONCURRENCY=50 STORM=50 STAMPEDE=1000 ./burst.sh https://paytm-seat-selection.onrender.com
   ```
+
+### Reading a failed run
+
+The checks fall into three groups:
+- **Correctness:** no seat sold twice; confirmed seats match the 201s; the counts add up.
+- **Scenario counts:** the hot-seat, retry and stampede tallies.
+- **Delivery and accounting:** zero 5xx; metrics match the responses.
+
+Which groups fail, together with the `outcomes:` lines, usually tells you what happened:
+
+```mermaid
+flowchart TD
+    A[burst.sh finished] --> B{Exit code 2?}
+    B -- yes --> B1[Setup failed: nothing was tested.<br/>Read the message: service asleep or not ready,<br/>wrong ADMIN_API_KEY, metrics credentials missing or wrong]
+    B -- no --> C{Any correctness check failed?<br/>no seat sold twice / confirmed = sold /<br/>counts add up / wins = HOT_SEATS}
+    C -- yes --> C1[A real bug: a seat sold twice or a lost update.<br/>Stop and investigate; run ./mvnw test]
+    C -- no --> D{Zero 5xx and failed connections passed?}
+    D -- yes --> E{Metrics checks passed?}
+    E -- yes --> OK[All good]
+    E -- no --> E1[Counters disagree but every request was answered:<br/>other traffic hit the service during the run,<br/>or the instance restarted and the counters reset]
+    D -- no --> F{Which outcome codes?}
+    F -- "500-internal_error" --> F1[App error: find unhandled error<br/>in the logs by request_id]
+    F -- "503-overloaded" --> F2[Waited 5 minutes for a database connection:<br/>instance overloaded. Lower CONCURRENCY or a bigger instance]
+    F -- "000, 502, 503, 504<br/>with no reason" --> G{Metrics checks passed?}
+    G -- "yes: server counted exactly<br/>what the client received" --> G1[The failed requests never reached the app.<br/>Dropped at the platform edge or on the network.<br/>Instance too small for this concurrency]
+    G -- "no: server counted more<br/>than the client received" --> G2[The app handled the request but the answer was lost:<br/>client timeout or proxy cut, e.g. Render after about 60 s.<br/>Check max latency against TIMEOUT]
+```
+
+**Notes**
+- **Scenario counts follow from delivery failures.** When requests fail with 5xx or `000`, the hot-seat, retry and stampede tallies come up short by the same number, as long as `wins = HOT_SEATS` still holds. Fix the delivery problem; the scenario logic is fine.
+- **"Timed out" invariant snapshots are not failures.** A seat-map poll that didn't answer in time proves nothing either way. Only snapshots whose counts don't add up fail the check.
+- **The two halves of the metrics check:**
+  - **The metric is higher than the responses:** the app counted something the client never saw.
+  - **The metric is lower than the responses:** the counters were reset during the run, usually by a restart.
 
 ## Tests
 
