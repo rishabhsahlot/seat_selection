@@ -3,6 +3,7 @@ package com.paytm.seat_selection.web;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import com.paytm.seat_selection.exception.ApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -30,7 +31,7 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(MethodArgumentNotValidException.class)
 	ResponseEntity<Map<String, Object>> handleInvalid(MethodArgumentNotValidException ex) {
 		String message = ex.getBindingResult().getFieldErrors().stream()
-			.map(e -> e.getField() + " " + e.getDefaultMessage())
+			.map(e -> toSnakeCase(e.getField()) + " " + e.getDefaultMessage())
 			.findFirst()
 			.orElse("invalid request");
 		return body(HttpStatus.UNPROCESSABLE_CONTENT, "validation", message);
@@ -39,6 +40,7 @@ public class ApiExceptionHandler {
 	@ExceptionHandler({ HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class,
 			MissingRequestHeaderException.class })
 	ResponseEntity<Map<String, Object>> handleMalformed(Exception ex) {
+		log.debug("malformed request: {}", ex.getMessage());
 		return body(HttpStatus.BAD_REQUEST, "malformed_request", "malformed request");
 	}
 
@@ -51,6 +53,11 @@ public class ApiExceptionHandler {
 	ResponseEntity<Map<String, Object>> handleUnexpected(Exception ex) {
 		log.error("unhandled error", ex);
 		return body(HttpStatus.INTERNAL_SERVER_ERROR, "internal_error", "internal error");
+	}
+
+	/** Field names in messages match the JSON the client sent (pricePaise -> price_paise). */
+	private static String toSnakeCase(String field) {
+		return field.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toLowerCase();
 	}
 
 	static ResponseEntity<Map<String, Object>> body(HttpStatus status, String reason, String message) {

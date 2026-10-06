@@ -1,4 +1,4 @@
-package com.paytm.seat_selection.web;
+package com.paytm.seat_selection.exception;
 
 import org.springframework.http.HttpStatus;
 

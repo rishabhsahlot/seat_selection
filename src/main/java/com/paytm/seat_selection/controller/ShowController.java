@@ -9,8 +9,8 @@ import jakarta.validation.Valid;
 import com.paytm.seat_selection.config.AppProperties;
 import com.paytm.seat_selection.dto.request.CreateShowRequest;
 import com.paytm.seat_selection.dto.response.ShowResponse;
+import com.paytm.seat_selection.exception.ApiException;
 import com.paytm.seat_selection.service.ShowService;
-import com.paytm.seat_selection.web.ApiException;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
