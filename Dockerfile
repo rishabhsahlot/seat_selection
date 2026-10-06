@@ -20,7 +20,10 @@ WORKDIR /app
 COPY --from=build /app.jar app.jar
 USER app
 # PORT is set by Render; 8080 elsewhere. Size the heap from the container's memory limit.
+# TieredStopAtLevel=1 uses only the JVM's quick compiler: on a small CPU, the full optimising
+# compiler competes with requests for minutes after every start. Measured at half a CPU, the
+# first burst after a start went from 73s to 18s; fully warm requests are a little slower.
 ENV PORT=8080 \
-	JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError"
+	JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -XX:TieredStopAtLevel=1"
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

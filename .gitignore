@@ -31,3 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Local secrets (docker compose reads .env) ###
+.env
