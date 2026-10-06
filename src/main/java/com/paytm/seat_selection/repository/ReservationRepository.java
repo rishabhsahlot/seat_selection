@@ -99,6 +99,17 @@ public class ReservationRepository {
 			.fetch();
 	}
 
+	/**
+	 * Holds still HELD more than {@code grace} past their deadline (database clock). The
+	 * sweeper runs every second, so this should always be 0. Uses the partial index on
+	 * held reservations.
+	 */
+	public int countOverdueHolds(Duration grace) {
+		return this.dsl.fetchCount(RESERVATIONS, RESERVATIONS.STATUS.eq(ReservationStatus.HELD),
+				RESERVATIONS.EXPIRES_AT.lt(DSL.field("now() - make_interval(secs => {0})", OffsetDateTime.class,
+						DSL.val(grace.toMillis() / 1000.0))));
+	}
+
 	/** Computed by the database clock, the same clock {@link #isHoldLive} and the sweeper use. */
 	private static Field<OffsetDateTime> expiryAfter(Duration ttl) {
 		return DSL.field("now() + make_interval(secs => {0})", OffsetDateTime.class, DSL.val(ttl.toMillis() / 1000.0));
