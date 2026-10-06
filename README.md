@@ -4,6 +4,7 @@ A JSON API that sells assigned seats for a show and stays correct under an on-sa
 
 - **Live service:** https://paytm-seat-selection.onrender.com (read the cold-start note below first)
 - **Design and trade-offs:** [WRITEUP.md](WRITEUP.md)
+- **Diagrams (PDF):** [Reservation Flow Map](Reservation%20Flow%20Map.pdf) (how a reservation moves through the code) and [Burst Failure Guide](Burst%20Failure%20Guide.pdf) (reading a failed burst run)
 - **Stack:** Java 21 (virtual threads), Spring Boot 4, Postgres, jOOQ, Flyway
 
 > [!IMPORTANT]
@@ -157,7 +158,7 @@ ADMIN_API_KEY=<the service's admin key> ./burst.sh https://paytm-seat-selection.
 
 ### Reading a failed run
 
-A rendered version of this chart, with worked examples from the live service, is in the [Burst Failure Guide](https://claude.ai/artifact/HyqY8FdEjiUbV3jWFU9Vp7).
+A rendered version of this chart, with worked examples from the live service, is in the [Burst Failure Guide](Burst%20Failure%20Guide.pdf) (PDF).
 
 The checks fall into three groups:
 - **Correctness:** no seat sold twice; confirmed seats match the 201s; the counts add up.

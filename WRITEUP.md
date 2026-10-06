@@ -2,7 +2,9 @@
 
 A JSON API that sells assigned seats for a show and stays correct when thousands of buyers hit the same seats at once. Spring Boot 4 (Java 21, virtual threads), Postgres, jOOQ, Flyway.
 
-**Diagrams:** [Reservation Flow Map](https://claude.ai/artifact/3dvXypsjPtJYn87m5inQve) shows who calls whom, the steps and lock order inside `reserve()`, and the reservation lifecycle.
+**Diagrams (PDF, in this repo):**
+- [Reservation Flow Map](Reservation%20Flow%20Map.pdf): who calls whom, the steps and lock order inside `reserve()`, and the reservation lifecycle.
+- [Burst Failure Guide](Burst%20Failure%20Guide.pdf): how to work out what went wrong from `burst.sh`'s passing and failing checks.
 
 **Live URL:** https://paytm-seat-selection.onrender.com. How to run everything is in the [README](README.md).
 
