@@ -4,7 +4,17 @@ A JSON API that sells assigned seats for a show and stays correct when thousands
 
 **Diagrams:** [Reservation Flow Map](https://claude.ai/artifact/3dvXypsjPtJYn87m5inQve) shows who calls whom, the steps and lock order inside `reserve()`, and the reservation lifecycle.
 
-**Live URL:** _to be added after the Render deploy_
+**Live URL:** https://paytm-seat-selection.onrender.com. How to run everything is in the [README](README.md).
+
+> [!IMPORTANT]
+> ## ⏱ Cold start: the live service sleeps when idle
+> **The live service runs on Render's free tier. After about 15 minutes without requests, Render shuts the instance down. The next request starts it again, which takes about a minute** (the container boots, the JVM starts, and the app connects to the database). That first request is slow, not broken.
+>
+> **Wake it up before testing**, and wait until this prints `{"status":"UP",…}`:
+> ```bash
+> until curl -sf --max-time 120 https://paytm-seat-selection.onrender.com/actuator/health/readiness; do sleep 5; done
+> ```
+> **The first burst after waking is also slower** while the JVM warms up. Running `burst.sh` twice gives the more representative second result.
 
 ## 1. The atomic decision
 
@@ -16,9 +26,11 @@ Every decision is made by Postgres inside one transaction, never by reading a va
 |---|---|---|
 | 1. Claim the idempotency key | `INSERT INTO reservations … ON CONFLICT (user_id, idempotency_key) DO NOTHING` | One reservation per key (section 2) |
 | 2. Per-user limit | `INSERT INTO user_show_holds … ON CONFLICT DO UPDATE SET seat_count = seat_count + n WHERE seat_count + n <= limit` | A user can never exceed the limit, even with parallel requests |
-| 3. Seats | `SELECT … ORDER BY seat_name FOR UPDATE`, then `UPDATE seats SET status = … WHERE … AND status = 'AVAILABLE'` | A seat can never be sold twice |
+| 3. Seats | for several seats, `SELECT … ORDER BY seat_name FOR UPDATE` first; then `UPDATE seats SET status = … WHERE … AND status = 'AVAILABLE'` | A seat can never be sold twice |
 
-**Why step 3 is race-free.** The row lock means only one transaction at a time can decide a given seat. When 500 requests race for A12, one takes the lock, updates the row and commits. The other 499 wait on that lock. Under Postgres's default isolation (READ COMMITTED), each of them re-reads the row once the winner commits, sees it is no longer `AVAILABLE`, updates 0 rows and gets a clean `409 seat_taken`. The `status = 'AVAILABLE'` condition is a second guard: even without the lock, the update can only take a seat that is still available. The schema adds a third layer. `seats` has one row per seat with exactly one status, and a `CHECK` requires a held or confirmed seat to point at a reservation, so the database itself refuses an inconsistent seat.
+**Before step 1,** two plain reads answer the requests that cannot create anything: a retry whose key already has a reservation gets that reservation back, and a request for a seat that is already gone gets `409 seat_taken`. Under an on-sale that is most of the traffic, so most requests never write a row or wait on a lock. These reads can be stale, but only in one direction: they can turn a buyer away from a seat that was taken a moment ago, never give one away. Taking a seat is always decided by step 3.
+
+**Why step 3 is race-free.** The row lock means only one transaction at a time can decide a given seat. For a single seat, the guarded `UPDATE` takes that lock itself; for several seats, the `SELECT … FOR UPDATE` takes them first, in name order. When 500 requests race for A12, one takes the lock, updates the row and commits. The other 499 wait on that lock. Under Postgres's default isolation (READ COMMITTED), each of them re-reads the row once the winner commits, sees it is no longer `AVAILABLE`, updates 0 rows and gets a clean `409 seat_taken`. The `status = 'AVAILABLE'` condition is a second guard: even without the lock, the update can only take a seat that is still available. The schema adds a third layer. `seats` has one row per seat with exactly one status, and a `CHECK` requires a held or confirmed seat to point at a reservation, so the database itself refuses an inconsistent seat.
 
 **Per-user limit.** The guarded upsert in step 2 is a single statement, and it locks that user's counter row. Ten parallel requests from one user therefore queue on one row, each seeing the count the previous one committed. Different users have different rows and never wait on each other.
 
@@ -26,11 +38,15 @@ Every decision is made by Postgres inside one transaction, never by reading a va
 
 **Avoiding deadlock.** Every write path takes its locks in the same global order: the reservation row, then the user's counter row, then seats **sorted by name**. `ReserveCommand` sorts the seat list when it is built, so `["B2","B1"]` and `["B1","B2"]` both lock B1 first. Two requests can make each other wait, but never wait on each other in a cycle. Confirm, cancel and expiry follow the same order.
 
-**Measured.** `burst.sh` fires 18,500 reserve requests at a fresh 1,000-seat show:
+**Measured locally.** `burst.sh` fires 18,500 reserve requests at a fresh 1,000-seat show:
 - **Hot-seat storm:** 5 hot seats × 500 users each. Exactly 5 winners; 2,495 × `409 seat_taken`.
 - **Parallel retries:** 50 keys × 20 copies. 50 reservations; 950 replays.
 - **Stampede:** 15,000 requests for random seats.
 - **Totals:** zero 5xx and zero failed connections, no seat sold twice, and `available + held + confirmed == total` in every snapshot taken during the burst.
+
+**Measured on the live service.** On the Render free instance (a fraction of one CPU), a 2,250-request burst (5 hot seats × 50 users, 50 keys × 20 retries, 1,000 stampede requests) passed every check with zero 5xx. Latency there is high (seconds per request at 300 in flight), because the instance is CPU-bound. Two changes made it hold up:
+- **Fast JVM warm-up** (`-XX:TieredStopAtLevel=1`): on half a CPU, the first burst after a start went from 73 s to 18 s.
+- **Queueing for database connections** for up to 5 minutes instead of 60 s (section 4), so an overloaded instance answers slowly rather than with errors.
 
 `ReservationConcurrencyTest` proves the same properties against a real Postgres. When the `status = 'AVAILABLE'` guard is removed, that test fails with 100 out of 100 racers "winning" one seat.
 
@@ -64,20 +80,23 @@ The service chooses **consistency**. There is one Postgres primary and it is the
   - **Reserve and cancel fail.** They return an error, never a guess. Selling a seat without the database could sell it twice, which is the one outcome that is never acceptable.
   - **Readiness fails closed.** `/actuator/health/readiness` uses its own short-lived connection with 2–3 second timeouts. It returns `503` within about 2 seconds, so the platform stops routing traffic. Liveness stays `200`, so the instance is not restarted in a loop over a problem a restart cannot fix.
   - **Saturation is not an outage.** A connection pool that is merely busy during a burst does not fail readiness, so a healthy instance is not pulled mid-stampede.
-- **Requests in flight during the outage** wait for a connection for up to 60 seconds and then fail with a 5xx. The zero-5xx guarantee covers contention, not a database outage. Section 7 lists turning these into a clean `503`.
+- **When no connection is free:** a request waits for a pooled connection for up to 5 minutes (`DB_CONNECTION_TIMEOUT_MS`).
+  - **Under a burst,** this is what the pool is for: requests queue and then get their real answer, a 201 or a clean 409, instead of an error.
+  - **If no connection frees up in time,** the response is `503` with `reason: "overloaded"` and a `Retry-After` header. Nothing has been decided or written at that point, so the client can safely retry with the same idempotency key.
+  - **During a database outage,** the same wait applies, so in-flight requests hang for up to 5 minutes before the 503. Readiness takes the instance out of rotation within seconds, so new traffic stops arriving. The zero-5xx guarantee covers contention, not an outage.
 - **Running more app instances** does not change this. They share the database, row locks and `SKIP LOCKED` work across instances, and no instance holds state the others need.
 
 ## 5. Observability: what would page me at 2am
 
 **What's exposed**
-- **Metrics** at `/actuator/prometheus`, scraped by Grafana Cloud:
+- **Metrics** at `/actuator/prometheus` (public, Prometheus format; readable with `curl`, and ready for Grafana or Prometheus to scrape):
   - `reservations_confirmed_total`, `reservations_held_total`
   - `reservations_declined_total{reason=seat_taken|per_user_limit|idempotent_replay|idempotency_key_reused|unknown_seat}`
   - `reservations_released_total{reason=cancelled|expired}`
   - per-show gauges `seats_available`, `seats_held`, `seats_confirmed`, `seats_capacity`
   - `reservations_holds_overdue`
 - **How the counters stay accurate:** they are driven by domain events delivered **after commit** (declines after rollback), so a counter never runs ahead of the database. `burst.sh` checks that the counter changes equal the responses exactly.
-- **Logs:** structured JSON (ECS) on stdout, also shipped to Grafana Cloud Loki.
+- **Logs:** structured JSON (ECS) on stdout, visible in Render's log viewer, and also shipped to Grafana Cloud Loki in the same region as the service. Grafana Cloud isn't public, so access is shared on request.
   - **Correlation:** every line carries a `request_id`, from `X-Request-Id` or generated, and echoed in the response and in every error body.
   - **Volume:** one access line per request, and one decision line per reservation outcome (`reserve succeeded` / `declined` with a reason / `replayed`, `hold confirmed`, `reservation cancelled`, `hold expired`).
 
@@ -87,7 +106,7 @@ The service chooses **consistency**. There is one Postgres primary and it is the
 |---|---|
 | `reservations_holds_overdue > 0` for 2 minutes | The sweeper has stopped; expired seats are not coming back. The service looks healthy while silently wrong, so this is the alert I care about most. |
 | Readiness failing | The database is unreachable; nothing can be sold. |
-| Any 5xx in the access logs | Declines are 4xx by design, so a 5xx means something actually broke. |
+| Any 5xx in the access logs | Declines are 4xx by design, so a 5xx means something actually broke. A `503 overloaded` means requests waited 5 minutes for a database connection. |
 | `hikaricp_connections_pending` high together with high reserve latency | The database or pool is the bottleneck; buyers are waiting. |
 
 **Dashboards, not pages:** declines by reason (a `seat_taken` spike is just a busy on-sale), and the seat gauges, which add up to capacity by construction.
@@ -129,7 +148,7 @@ Output is what Claude wrote: code, explanations and drafts. Almost all of the to
 
 ## 7. What I'd do next
 
-- **Clean 503s during a database outage:** fail fast instead of waiting 60s, and retry deadlock or serialization errors (none have been seen, but a retry is cheap insurance).
+- **Fail fast during a database outage:** today an outage and a busy pool look the same, so requests wait the full 5 minutes either way. A circuit breaker driven by the readiness check would answer `503` at once while the database is down, and keep queueing only when it's merely busy. Also retry deadlock or serialization errors (none have been seen, but a retry is cheap insurance).
 - **Real authentication, and limiting bots:** `/auth/token` is a demo issuer that will mint a token for any user id, so today one person could act as thousands of users and get around the per-user limit. In production:
   - Tokens come from an identity provider, tied to verified accounts (email or phone), so the per-user limit means one limit per real person.
   - A CAPTCHA or similar challenge when entering the waiting room, so scripts can't join the queue at scale.
