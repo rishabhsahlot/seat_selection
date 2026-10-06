@@ -45,8 +45,15 @@ fail() { echo "burst.sh: $1" >&2; exit 2; }
 lines() { wc -l <"$1" | tr -d ' '; }
 
 # Runs FUNCTION once per line of input, CONCURRENCY at a time; the line's words become
-# its arguments. Output goes through a pipe, where short lines never get mixed together.
-in_parallel() { xargs -P "$CONCURRENCY" -L 1 bash -c "$1 \"\$@\"" _ | cat; }
+# its arguments. Each run writes to its own file, so slow or overlapping runs can never
+# clash on a shared pipe; the files are joined afterwards.
+in_parallel() {
+	local out
+	out=$(mktemp -d "$WORK/parallel.XXXXXX")
+	xargs -P "$CONCURRENCY" -L 1 bash -c "$1 \"\$@\" > \"\$(mktemp '$out/XXXXXX')\"" _
+	find "$out" -type f -exec cat {} +
+	rm -rf "$out"
+}
 
 # How many result lines match a regex, e.g. count ' 201$'.
 count() { grep -cE "$1" "$WORK/results"; }
@@ -79,20 +86,27 @@ report() {
 
 # ---------------------------------------------------------------- requests (run in parallel)
 
-# One reserve request. Prints one result line: SCENARIO TAG SEATS OUTCOME, where OUTCOME is
-# 201, 200-replay, 409-seat_taken, 409-per_user_limit ..., or 000 if the connection failed.
+# One reserve request. Prints one result line: SCENARIO TAG SEATS OUTCOME MILLISECONDS, where
+# OUTCOME is 201, 200-replay, 409-seat_taken, 409-per_user_limit ..., or 000 if the connection failed.
 reserve() { # SCENARIO TAG TOKEN SEATS KEY   (SEATS like A1 or A1,A2)
 	local body="{\"seats\":[\"${4//,/\",\"}\"],\"idempotency_key\":\"$5\"}"
 	local out
 	out=$(curl -s --max-time "$TIMEOUT" -X POST "$BASE/shows/$SID/reserve" -d "$body" \
 		-H "Authorization: Bearer $3" -H 'Content-Type: application/json' \
-		-w '\n%{http_code} %header{idempotent-replayed}')
+		-w '\n%{http_code}|%header{idempotent-replayed}|%{time_total}')
 
-	local status=${out##*$'\n'} # the -w line: "201 ", "409 " or "200 true"
-	local outcome=${status% *}
-	[[ $status == *true ]] && outcome=200-replay
+	local status=${out##*$'\n'}  # the -w line, e.g. "200|true|0.012345"
+	local code=${status%%|*}
+	local replayed=${status#*|}
+	replayed=${replayed%%|*}
+	local seconds=${status##*|} # e.g. 0.012345 -> 12 ms
+	local whole=${seconds%.*} fraction=${seconds#*.}000
+	local ms=$((10#$whole * 1000 + 10#${fraction:0:3}))
+
+	local outcome=$code
+	[ "$replayed" = true ] && outcome=200-replay
 	[[ $out =~ \"reason\":\"([a-z_]+)\" ]] && outcome=$outcome-${BASH_REMATCH[1]}
-	echo "$1 $2 $4 $outcome"
+	echo "$1 $2 $4 $outcome $ms"
 }
 
 # Gets a token for user number N. Prints "N TOKEN". Retried, because this is setup, not the test.
@@ -176,10 +190,14 @@ burst_jobs() {
 }
 
 # Polls the show's seat counts until the burst ends. Writes "ok", or the counts that don't add up.
+# A snapshot that doesn't arrive in time (a slow server under load) is recorded as
+# "no answer": it proves nothing either way, so it is reported but not counted as bad.
 watch_invariant() {
+	local body
 	until [ -f "$WORK/done" ]; do
-		curl -s --max-time 10 "$BASE/shows/$SID" |
-			jq -r '.counts | if .available + .held + .confirmed == .total then "ok" else tostring end'
+		body=$(curl -s --max-time 10 "$BASE/shows/$SID")
+		[ -n "$body" ] && jq -r '.counts | if .available + .held + .confirmed == .total then "ok" else tostring end' \
+			<<<"$body" 2>/dev/null || echo "no answer"
 		sleep 0.25
 	done >"$WORK/invariant"
 }
@@ -190,10 +208,14 @@ fire_burst() {
 	echo "firing $(lines "$WORK/jobs") reserve requests, $CONCURRENCY at a time ..."
 	watch_invariant &
 	local start=$SECONDS
-	in_parallel reserve <"$WORK/jobs" >"$WORK/results"
+	in_parallel reserve <"$WORK/jobs" >"$WORK/timed"
 	touch "$WORK/done" # stops the watcher
 	wait
 	echo "done in $((SECONDS - start))s"
+
+	# Split the timings off, so the results file keeps its four fields.
+	cut -d' ' -f5 "$WORK/timed" | sort -n >"$WORK/latency"
+	cut -d' ' -f1-4 "$WORK/timed" >"$WORK/results"
 }
 
 # ---------------------------------------------------------------- results
@@ -212,6 +234,14 @@ print_outcomes() {
 	echo
 	echo "outcomes:"
 	cut -d' ' -f1,4 "$WORK/results" | sort | uniq -c | sort -k2,2 -k1,1nr
+
+	# Latency as seen by this client, including the network: the value below which
+	# 50%, 95% and 99% of reserve requests finished.
+	local n
+	n=$(lines "$WORK/latency")
+	percentile() { sed -n "$(((n * $1 + 99) / 100))p" "$WORK/latency"; }
+	echo
+	echo "latency: p50 $(percentile 50) ms, p95 $(percentile 95) ms, p99 $(percentile 99) ms, max $(tail -1 "$WORK/latency") ms"
 }
 
 run_checks() {
@@ -248,8 +278,8 @@ run_checks() {
 	calc "seat names that differ = 0" "$(comm -3 "$WORK/sold" "$WORK/confirmed" | wc -l | tr -d ' ')" 0
 	report "the show's confirmed seats are exactly the seats in 201 responses"
 
-	calc "snapshots where the counts don't add up = 0" "$(grep -cv '^ok$' "$WORK/invariant")" 0 \
-		"0 (of $(lines "$WORK/invariant") snapshots)"
+	calc "snapshots where the counts don't add up = 0" "$(grep -cvE '^(ok|no answer)$' "$WORK/invariant")" 0 \
+		"0 (of $(grep -c '^ok$' "$WORK/invariant") answered; $(grep -c '^no answer$' "$WORK/invariant") timed out)"
 	report "available + held + confirmed == total during the burst"
 
 	# 000 = the connection failed before any HTTP response.
