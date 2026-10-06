@@ -139,6 +139,14 @@ public class ReservationService {
 		return ReservationResponse.from(requireOwned(id, userId));
 	}
 
+	/** Expires up to {@code limit} overdue holds; called by {@link HoldSweeper}. */
+	@Transactional
+	public int expireDueHolds(int limit) {
+		List<ReservationsRecord> due = this.reservations.lockDueHolds(limit);
+		due.forEach(reservation -> release(reservation, ReservationTransition.EXPIRE));
+		return due.size();
+	}
+
 	/**
 	 * Returns the reservation's seats to available and gives the user back their
 	 * quota.
