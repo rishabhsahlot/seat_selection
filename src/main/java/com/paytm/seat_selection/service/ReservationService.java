@@ -1,6 +1,7 @@
 package com.paytm.seat_selection.service;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import com.paytm.seat_selection.config.AppProperties;
@@ -84,12 +85,34 @@ public class ReservationService {
 			throw decline(DeclineReason.PER_USER_LIMIT, command, limitMessage(show));
 		}
 
-		// 1. Claim the idempotency key. A concurrent duplicate waits here, then
-		// replays.
+		// 0. Cheap reads before any write: answer retries and requests that cannot succeed.
+		// Under an on-sale most requests are for seats already gone; they stop here instead of
+		// writing rows, waiting on seat locks and rolling back.
+		Optional<ReservationsRecord> earlier = this.reservations.findByKey(command.userId(), command.idempotencyKey());
+		if (earlier.isPresent()) {
+			return replay(command, earlier.get());
+		}
+		SeatRepository.Availability seats = this.seats.availability(command.showId(), command.seats());
+		if (seats.existing() != command.seatCount()) {
+			throw decline(DeclineReason.UNKNOWN_SEAT, command, DeclineReason.UNKNOWN_SEAT.defaultMessage());
+		}
+		if (seats.available() != command.seatCount()) {
+			// Our own earlier attempt may have committed between the two reads above; then
+			// this is a retry, not a loss.
+			earlier = this.reservations.findByKey(command.userId(), command.idempotencyKey());
+			if (earlier.isPresent()) {
+				return replay(command, earlier.get());
+			}
+			throw decline(DeclineReason.SEAT_TAKEN, command, DeclineReason.SEAT_TAKEN.defaultMessage());
+		}
+
+		// 1. Claim the idempotency key. A concurrent duplicate waits here, then replays.
 		UUID id = UUID.randomUUID();
 		long amount = show.pricePaise() * command.seatCount();
-		if (!this.reservations.insertIfKeyUnused(id, command, amount, this.props.holdTtl())) {
-			return replay(command);
+		Optional<ReservationsRecord> inserted = this.reservations.insertIfKeyUnused(id, command, amount,
+				this.props.holdTtl());
+		if (inserted.isEmpty()) {
+			return replay(command, this.reservations.findByKey(command.userId(), command.idempotencyKey()).orElseThrow());
 		}
 
 		// 2. Per-user limit, atomic and serialised per (show, user).
@@ -97,9 +120,11 @@ public class ReservationService {
 			throw decline(DeclineReason.PER_USER_LIMIT, command, limitMessage(show));
 		}
 
-		// 3. Seats: lock in name order, then take only those still available.
-		if (this.seats.lockInOrder(command.showId(), command.seats()) != command.seatCount()) {
-			throw decline(DeclineReason.UNKNOWN_SEAT, command, DeclineReason.UNKNOWN_SEAT.defaultMessage());
+		// 3. Seats: take only those still available. Several seats are locked in name order
+		// first, so overlapping requests cannot deadlock; a single seat needs no separate lock,
+		// because the guarded update locks its one row itself.
+		if (command.seatCount() > 1) {
+			this.seats.lockInOrder(command.showId(), command.seats());
 		}
 		int assigned = this.seats.assignIfAvailable(command.showId(), command.seats(), id, command.userId(),
 				command.seatStatus());
@@ -107,7 +132,7 @@ public class ReservationService {
 			throw decline(DeclineReason.SEAT_TAKEN, command, DeclineReason.SEAT_TAKEN.defaultMessage());
 		}
 
-		ReservationsRecord created = requireOwned(id, command.userId());
+		ReservationsRecord created = inserted.get();
 		this.events.publishEvent(new ReservationCreated(id, command.showId(), command.userId(), command.seats(),
 				created.getStatus()));
 		log.atInfo()
@@ -119,6 +144,7 @@ public class ReservationService {
 				.log("reserve succeeded");
 		return new ReserveOutcome(ReservationResponse.from(created), false);
 	}
+
 
 	/** Turns the caller's own unexpired hold into a confirmed reservation. */
 	@Transactional
@@ -180,9 +206,7 @@ public class ReservationService {
 				.log(transition == ReservationTransition.EXPIRE ? "hold expired" : "reservation cancelled");
 	}
 
-	private ReserveOutcome replay(ReserveCommand command) {
-		ReservationsRecord original = this.reservations.findByKey(command.userId(), command.idempotencyKey())
-				.orElseThrow();
+	private ReserveOutcome replay(ReserveCommand command, ReservationsRecord original) {
 		if (!command.isRetryOf(original)) {
 			throw decline(DeclineReason.IDEMPOTENCY_KEY_REUSED, command,
 					DeclineReason.IDEMPOTENCY_KEY_REUSED.defaultMessage());

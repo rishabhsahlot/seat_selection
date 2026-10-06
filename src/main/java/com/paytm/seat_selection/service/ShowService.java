@@ -5,6 +5,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.paytm.seat_selection.config.AppProperties;
 import com.paytm.seat_selection.dto.request.CreateShowRequest;
@@ -31,6 +32,12 @@ public class ShowService {
 	private final SeatRepository seats;
 
 	private final AppProperties props;
+
+	/**
+	 * Shows are never updated or deleted after creation, so a show read once can be served
+	 * from memory. This saves a database round trip on every reserve request.
+	 */
+	private final Map<UUID, Shows> cache = new ConcurrentHashMap<>();
 
 	public ShowService(ShowRepository shows, SeatRepository seats, AppProperties props) {
 		this.shows = shows;
@@ -60,7 +67,13 @@ public class ShowService {
 	}
 
 	public Shows require(UUID id) {
-		return this.shows.findById(id).orElseThrow(() -> ApiException.notFound("show"));
+		Shows cached = this.cache.get(id);
+		if (cached != null) {
+			return cached;
+		}
+		Shows show = this.shows.findById(id).orElseThrow(() -> ApiException.notFound("show"));
+		this.cache.put(id, show);
+		return show;
 	}
 
 	/**

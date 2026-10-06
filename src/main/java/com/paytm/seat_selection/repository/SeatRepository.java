@@ -49,6 +49,23 @@ public class SeatRepository {
 		return this.dsl.selectFrom(SEATS).where(SEATS.SHOW_ID.eq(showId)).orderBy(SEATS.SEAT_NAME).fetchInto(Seats.class);
 	}
 
+	/** How many of the named seats exist, and how many of those are still available. */
+	public record Availability(int existing, int available) {
+	}
+
+	/**
+	 * A plain read with no locks, used to turn away requests that cannot succeed before
+	 * they write anything. It can be stale by the time the transaction locks the seats, so
+	 * it only ever leads to a decline; taking a seat is still decided under the lock.
+	 */
+	public Availability availability(UUID showId, List<String> seatNames) {
+		var row = this.dsl.select(DSL.count(), DSL.count().filterWhere(SEATS.STATUS.eq(SeatStatus.AVAILABLE)))
+			.from(SEATS)
+			.where(SEATS.SHOW_ID.eq(showId), SEATS.SEAT_NAME.in(seatNames))
+			.fetchSingle();
+		return new Availability(row.value1(), row.value2());
+	}
+
 	/**
 	 * {@code SELECT ... ORDER BY seat_name FOR UPDATE}: row-locks the named seats in name
 	 * order. A waiter re-reads each row once the holder commits.

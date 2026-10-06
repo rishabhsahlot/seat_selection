@@ -29,11 +29,11 @@ public class ReservationRepository {
 
 	/**
 	 * Claims the idempotency key by inserting the reservation:
-	 * {@code INSERT ... ON CONFLICT (user_id, idempotency_key) DO NOTHING}. A concurrent
-	 * insert with the same key blocks on the unique index until this transaction ends.
-	 * @return {@code false} if this user already used the key
+	 * {@code INSERT ... ON CONFLICT (user_id, idempotency_key) DO NOTHING RETURNING *}. A
+	 * concurrent insert with the same key blocks on the unique index until this transaction ends.
+	 * @return the new row, or empty if this user already used the key
 	 */
-	public boolean insertIfKeyUnused(UUID id, ReserveCommand command, long amountPaise, Duration holdTtl) {
+	public Optional<ReservationsRecord> insertIfKeyUnused(UUID id, ReserveCommand command, long amountPaise, Duration holdTtl) {
 		boolean hold = command.mode() == ReservationMode.HOLD;
 		return this.dsl.insertInto(RESERVATIONS)
 			.set(RESERVATIONS.ID, id)
@@ -47,7 +47,8 @@ public class ReservationRepository {
 			.set(RESERVATIONS.EXPIRES_AT, hold ? expiryAfter(holdTtl) : DSL.castNull(OffsetDateTime.class))
 			.onConflict(RESERVATIONS.USER_ID, RESERVATIONS.IDEMPOTENCY_KEY)
 			.doNothing()
-			.execute() == 1;
+			.returning()
+			.fetchOptional();
 	}
 
 	public Optional<ReservationsRecord> findByKey(String userId, String idempotencyKey) {
