@@ -6,9 +6,10 @@ import java.nio.charset.StandardCharsets;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 import com.nimbusds.jose.jwk.source.ImmutableSecret;
 import com.paytm.seat_selection.web.ApiExceptionHandler;
-import jakarta.servlet.http.HttpServletResponse;
 import tools.jackson.databind.json.JsonMapper;
 
 import org.springframework.context.annotation.Bean;
@@ -39,6 +40,7 @@ public class SecurityConfig {
 						.requestMatchers(HttpMethod.POST, "/auth/token").permitAll()
 						// Admin endpoint: guarded by X-Admin-Key in the controller, not by user tokens.
 						.requestMatchers(HttpMethod.POST, "/shows").permitAll()
+						.requestMatchers(HttpMethod.GET, "/shows/*").permitAll()
 						.anyRequest().authenticated())
 				.oauth2ResourceServer(o -> o.jwt(jwt -> {
 				}).authenticationEntryPoint(jsonError(json, HttpStatus.UNAUTHORIZED, "unauthorized",
