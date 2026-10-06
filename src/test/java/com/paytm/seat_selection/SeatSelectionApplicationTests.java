@@ -1,13 +1,15 @@
 package com.paytm.seat_selection;
 
+import com.paytm.seat_selection.support.IntegrationTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
 
-@SpringBootTest
-class SeatSelectionApplicationTests {
+import static org.assertj.core.api.Assertions.assertThat;
+
+class SeatSelectionApplicationTests extends IntegrationTest {
 
 	@Test
-	void contextLoads() {
+	void startsAndIsReady() {
+		assertThat(send("GET", "/actuator/health/readiness", null, null, java.util.Map.of()).status()).isEqualTo(200);
 	}
 
 }
