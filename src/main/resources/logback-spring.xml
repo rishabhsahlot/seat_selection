@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Console: structured JSON (ECS) on stdout, always - this is what Render's log stream shows.
+  Loki:    with the "loki" profile, the same events are also pushed to Grafana Cloud Loki in batches
+           from a background thread, so a slow or unreachable Loki never blocks a request.
+           Needs LOKI_URL (…/loki/api/v1/push), LOKI_USERNAME (numeric user id), LOKI_PASSWORD (API token).
+-->
+<configuration>
+	<include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+	<include resource="org/springframework/boot/logging/logback/structured-console-appender.xml"/>
+
+	<springProfile name="loki">
+		<appender name="LOKI" class="com.github.loki4j.logback.Loki4jAppender">
+			<!-- Labels index streams: keep them low-cardinality. request_id, user_id etc. live in the JSON body. -->
+			<labels>
+				app = seat-selection
+				env = ${APP_ENV:-prod}
+				level = %level
+			</labels>
+			<message class="com.github.loki4j.logback.JsonLayout"/>
+			<http>
+				<url>${LOKI_URL}</url>
+				<auth>
+					<username>${LOKI_USERNAME}</username>
+					<password>${LOKI_PASSWORD}</password>
+				</auth>
+			</http>
+			<batch>
+				<!-- Send at least every 5s so a live burst shows up in Grafana promptly. -->
+				<timeoutMs>5000</timeoutMs>
+			</batch>
+		</appender>
+		<root level="INFO">
+			<appender-ref ref="CONSOLE"/>
+			<appender-ref ref="LOKI"/>
+		</root>
+	</springProfile>
+
+	<springProfile name="!loki">
+		<root level="INFO">
+			<appender-ref ref="CONSOLE"/>
+		</root>
+	</springProfile>
+</configuration>

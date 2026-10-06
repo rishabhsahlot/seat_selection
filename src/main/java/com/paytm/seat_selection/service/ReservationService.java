@@ -18,6 +18,8 @@ import com.paytm.seat_selection.jooq.tables.records.ReservationsRecord;
 import com.paytm.seat_selection.repository.ReservationRepository;
 import com.paytm.seat_selection.repository.SeatRepository;
 import com.paytm.seat_selection.repository.UserSeatCountRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
@@ -33,12 +35,17 @@ import org.springframework.transaction.annotation.Transactional;
  * then seat rows in name order - so concurrent requests cannot deadlock. In
  * {@link #reserve} the order of the steps is that lock order.
  * <p>
- * Logging and metrics are not done here: the service publishes what happened,
- * and
- * listeners record it once the transaction has committed (or rolled back).
+ * Each decision is logged here as one structured line. Metrics are not counted
+ * here: the service publishes what happened, and ReservationMetrics counts it
+ * once
+ * the transaction has committed (or rolled back), so counters never run ahead
+ * of
+ * the database.
  */
 @Service
 public class ReservationService {
+
+	private static final Logger log = LoggerFactory.getLogger(ReservationService.class);
 
 	private final ShowService shows;
 
@@ -103,6 +110,13 @@ public class ReservationService {
 		ReservationsRecord created = requireOwned(id, command.userId());
 		this.events.publishEvent(new ReservationCreated(id, command.showId(), command.userId(), command.seats(),
 				created.getStatus()));
+		log.atInfo()
+				.addKeyValue("outcome", created.getStatus().getLiteral().toLowerCase())
+				.addKeyValue("reservation_id", id)
+				.addKeyValue("show_id", command.showId())
+				.addKeyValue("user_id", command.userId())
+				.addKeyValue("seats", String.join(",", command.seats()))
+				.log("reserve succeeded");
 		return new ReserveOutcome(ReservationResponse.from(created), false);
 	}
 
@@ -122,6 +136,7 @@ public class ReservationService {
 		this.seats.confirmFor(reservation.getShowId(), seatNames, id);
 		this.reservations.updateStatus(id, ReservationTransition.CONFIRM.target());
 		this.events.publishEvent(new HoldConfirmed(id, userId));
+		log.atInfo().addKeyValue("reservation_id", id).addKeyValue("user_id", userId).log("hold confirmed");
 		return ReservationResponse.from(requireOwned(id, userId));
 	}
 
@@ -159,6 +174,10 @@ public class ReservationService {
 		this.seats.freeFor(reservation.getShowId(), seatNames, reservation.getId());
 		this.events.publishEvent(
 				new ReservationReleased(reservation.getId(), reservation.getUserId(), transition.target()));
+		log.atInfo()
+				.addKeyValue("reservation_id", reservation.getId())
+				.addKeyValue("user_id", reservation.getUserId())
+				.log(transition == ReservationTransition.EXPIRE ? "hold expired" : "reservation cancelled");
 	}
 
 	private ReserveOutcome replay(ReserveCommand command) {
@@ -169,12 +188,24 @@ public class ReservationService {
 					DeclineReason.IDEMPOTENCY_KEY_REUSED.defaultMessage());
 		}
 		this.events.publishEvent(new ReservationReplayed(original.getId(), command.userId()));
+		log.atInfo()
+				.addKeyValue("outcome", "idempotent_replay")
+				.addKeyValue("reservation_id", original.getId())
+				.addKeyValue("user_id", command.userId())
+				.log("reserve replayed");
 		return new ReserveOutcome(ReservationResponse.from(original), true);
 	}
 
 	private ReservationDeclinedException decline(DeclineReason reason, ReserveCommand command, String message) {
 		this.events.publishEvent(
 				new ReservationDeclined(reason, command.showId(), command.userId(), command.seats()));
+		log.atInfo()
+				.addKeyValue("outcome", "declined")
+				.addKeyValue("reason", reason.code())
+				.addKeyValue("show_id", command.showId())
+				.addKeyValue("user_id", command.userId())
+				.addKeyValue("seats", String.join(",", command.seats()))
+				.log("reserve declined");
 		return new ReservationDeclinedException(reason, message);
 	}
 

@@ -15,12 +15,16 @@ import com.paytm.seat_selection.jooq.tables.pojos.Seats;
 import com.paytm.seat_selection.jooq.tables.pojos.Shows;
 import com.paytm.seat_selection.repository.SeatRepository;
 import com.paytm.seat_selection.repository.ShowRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ShowService {
+
+	private static final Logger log = LoggerFactory.getLogger(ShowService.class);
 
 	private final ShowRepository shows;
 
@@ -45,6 +49,13 @@ public class ShowService {
 		UUID id = UUID.randomUUID();
 		this.shows.insert(id, request.name(), request.pricePaise(), limit, seatNames.size());
 		this.seats.insertAll(id, seatNames);
+		log.atInfo()
+			.addKeyValue("show_id", id)
+			.addKeyValue("name", request.name())
+			.addKeyValue("total_seats", seatNames.size())
+			.addKeyValue("per_user_limit", limit)
+			.addKeyValue("price_paise", request.pricePaise())
+			.log("show created");
 		return get(id);
 	}
 

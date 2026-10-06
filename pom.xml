@@ -58,6 +58,12 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
 		</dependency>
+		<dependency>
+			<!-- Ships logs to Grafana Cloud Loki when the "loki" profile is active (see logback-spring.xml). -->
+			<groupId>com.github.loki4j</groupId>
+			<artifactId>loki-logback-appender</artifactId>
+			<version>2.1.0</version>
+		</dependency>
 
 		<dependency>
 			<groupId>org.postgresql</groupId>
