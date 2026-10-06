@@ -157,6 +157,8 @@ ADMIN_API_KEY=<the service's admin key> ./burst.sh https://paytm-seat-selection.
 
 ### Reading a failed run
 
+A rendered version of this chart, with worked examples from the live service, is in the [Burst Failure Guide](https://claude.ai/artifact/HyqY8FdEjiUbV3jWFU9Vp7).
+
 The checks fall into three groups:
 - **Correctness:** no seat sold twice; confirmed seats match the 201s; the counts add up.
 - **Scenario counts:** the hot-seat, retry and stampede tallies.
