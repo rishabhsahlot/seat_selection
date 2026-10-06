@@ -5,6 +5,7 @@ target/
 .idea/
 *.iml
 HELP.md
+WRITEUP.md
 burst.sh
 docker-compose.yml
 Dockerfile
