@@ -58,6 +58,16 @@ public class ReservationController {
 		return ResponseEntity.status(HttpStatus.CREATED).body(outcome.reservation());
 	}
 
+	@PostMapping("/reservations/{id}/confirm")
+	public ReservationResponse confirm(@PathVariable UUID id, @AuthenticationPrincipal Jwt jwt) {
+		return this.reservations.confirm(id, jwt.getSubject());
+	}
+
+	@PostMapping("/reservations/{id}/cancel")
+	public ReservationResponse cancel(@PathVariable UUID id, @AuthenticationPrincipal Jwt jwt) {
+		return this.reservations.cancel(id, jwt.getSubject());
+	}
+
 	@GetMapping("/reservations/{id}")
 	public ReservationResponse get(@PathVariable UUID id, @AuthenticationPrincipal Jwt jwt) {
 		return this.reservations.get(id, jwt.getSubject());

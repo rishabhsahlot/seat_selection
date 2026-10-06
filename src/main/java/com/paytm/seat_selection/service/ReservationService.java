@@ -1,11 +1,14 @@
 package com.paytm.seat_selection.service;
 
+import java.util.List;
 import java.util.UUID;
 
 import com.paytm.seat_selection.config.AppProperties;
 import com.paytm.seat_selection.dto.response.ReservationResponse;
+import com.paytm.seat_selection.event.HoldConfirmed;
 import com.paytm.seat_selection.event.ReservationCreated;
 import com.paytm.seat_selection.event.ReservationDeclined;
+import com.paytm.seat_selection.event.ReservationReleased;
 import com.paytm.seat_selection.event.ReservationReplayed;
 import com.paytm.seat_selection.exception.ApiException;
 import com.paytm.seat_selection.exception.DeclineReason;
@@ -103,8 +106,51 @@ public class ReservationService {
 		return new ReserveOutcome(ReservationResponse.from(created), false);
 	}
 
+	/** Turns the caller's own unexpired hold into a confirmed reservation. */
+	@Transactional
+	public ReservationResponse confirm(UUID id, String userId) {
+		ReservationsRecord reservation = lockOwned(id, userId);
+		if (!ReservationTransition.CONFIRM.appliesTo(reservation.getStatus())) {
+			return ReservationResponse.from(reservation);
+		}
+		if (!this.reservations.isHoldLive(id)) {
+			// The sweeper will release it; confirming after the deadline is never allowed.
+			throw ApiException.conflict("hold_expired", "hold has expired");
+		}
+		List<String> seatNames = List.of(reservation.getSeats());
+		this.seats.lockInOrder(reservation.getShowId(), seatNames);
+		this.seats.confirmFor(reservation.getShowId(), seatNames, id);
+		this.reservations.updateStatus(id, ReservationTransition.CONFIRM.target());
+		this.events.publishEvent(new HoldConfirmed(id, userId));
+		return ReservationResponse.from(requireOwned(id, userId));
+	}
+
+	/** Releases the caller's own hold or confirmed reservation. */
+	@Transactional
+	public ReservationResponse cancel(UUID id, String userId) {
+		ReservationsRecord reservation = lockOwned(id, userId);
+		if (ReservationTransition.CANCEL.appliesTo(reservation.getStatus())) {
+			release(reservation, ReservationTransition.CANCEL);
+		}
+		return ReservationResponse.from(requireOwned(id, userId));
+	}
+
 	public ReservationResponse get(UUID id, String userId) {
 		return ReservationResponse.from(requireOwned(id, userId));
+	}
+
+	/**
+	 * Returns the reservation's seats to available and gives the user back their
+	 * quota.
+	 */
+	private void release(ReservationsRecord reservation, ReservationTransition transition) {
+		List<String> seatNames = List.of(reservation.getSeats());
+		this.reservations.updateStatus(reservation.getId(), transition.target());
+		this.seatCounts.subtract(reservation.getShowId(), reservation.getUserId(), seatNames.size());
+		this.seats.lockInOrder(reservation.getShowId(), seatNames);
+		this.seats.freeFor(reservation.getShowId(), seatNames, reservation.getId());
+		this.events.publishEvent(
+				new ReservationReleased(reservation.getId(), reservation.getUserId(), transition.target()));
 	}
 
 	private ReserveOutcome replay(ReserveCommand command) {
@@ -122,6 +168,14 @@ public class ReservationService {
 		this.events.publishEvent(
 				new ReservationDeclined(reason, command.showId(), command.userId(), command.seats()));
 		return new ReservationDeclinedException(reason, message);
+	}
+
+	/**
+	 * Another user's reservation is reported as not found, so ownership is not
+	 * leaked.
+	 */
+	private ReservationsRecord lockOwned(UUID id, String userId) {
+		return this.reservations.lockOwned(id, userId).orElseThrow(() -> ApiException.notFound("reservation"));
 	}
 
 	private ReservationsRecord requireOwned(UUID id, String userId) {
