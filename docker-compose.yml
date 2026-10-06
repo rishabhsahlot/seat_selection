@@ -1,0 +1,38 @@
+# Runs the service exactly as it is deployed: the same image, configured by environment.
+#   docker compose up --build        then   ./burst.sh http://localhost:8080
+services:
+  app:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: seats
+      DATABASE_USERNAME: seats
+      DATABASE_PASSWORD: seats
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-dev-only-secret-change-me}
+      HOLD_TTL: ${HOLD_TTL:-120s}
+      # To also ship logs to Grafana Cloud: set these in your shell or a .env file.
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-}
+      LOKI_URL: ${LOKI_URL:-}
+      LOKI_USERNAME: ${LOKI_USERNAME:-}
+      LOKI_PASSWORD: ${LOKI_PASSWORD:-}
+      APP_ENV: ${APP_ENV:-docker}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: seats
+      POSTGRES_USER: seats
+      POSTGRES_PASSWORD: seats
+    # Only for inspecting the DB from the host (psql/pgAdmin); the app connects over the compose network.
+    ports: ["${DB_HOST_PORT:-5432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seats -d seats"]
+      interval: 2s
+      retries: 30
