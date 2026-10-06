@@ -89,7 +89,7 @@ The service chooses **consistency**. There is one Postgres primary and it is the
 ## 5. Observability: what would page me at 2am
 
 **What's exposed**
-- **Metrics** at `/actuator/prometheus` (public, Prometheus format; readable with `curl`, and ready for Grafana or Prometheus to scrape):
+- **Metrics** at `/actuator/prometheus` (Prometheus format), protected with HTTP Basic auth on the live service and scraped by Grafana Cloud every minute, so they're kept over time:
   - `reservations_confirmed_total`, `reservations_held_total`
   - `reservations_declined_total{reason=seat_taken|per_user_limit|idempotent_replay|idempotency_key_reused|unknown_seat}`
   - `reservations_released_total{reason=cancelled|expired}`

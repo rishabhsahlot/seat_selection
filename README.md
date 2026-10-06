@@ -141,6 +141,7 @@ ADMIN_API_KEY=<the service's admin key> ./burst.sh https://paytm-seat-selection.
   | Variable | Default | What it controls |
   |---|---|---|
   | `ADMIN_API_KEY` | `dev-admin-key` | Must match the service's key |
+| `METRICS_USERNAME` / `METRICS_PASSWORD` | `metrics` / (none) | Needed if the service protects `/actuator/prometheus` |
   | `CONCURRENCY` | `300` | Requests in flight at once |
   | `HOT_SEATS` / `STORM` | `5` / `500` | Hot seats, and users racing for each |
   | `RETRY_KEYS` / `RETRY_FANOUT` | `50` / `20` | Retried requests, and copies of each |
@@ -150,27 +151,29 @@ ADMIN_API_KEY=<the service's admin key> ./burst.sh https://paytm-seat-selection.
 
 - **Against the live free instance,** use a smaller run. It has a fraction of one CPU, so 300 requests at once mostly measures queueing:
   ```bash
-  ADMIN_API_KEY=<key> CONCURRENCY=50 STORM=50 STAMPEDE=1000 ./burst.sh https://paytm-seat-selection.onrender.com
+  ADMIN_API_KEY=<key> METRICS_USERNAME=<user> METRICS_PASSWORD=<password> \
+    CONCURRENCY=50 STORM=50 STAMPEDE=1000 ./burst.sh https://paytm-seat-selection.onrender.com
   ```
 
 ## Tests
 
 ```bash
-./mvnw test                                  # all 31 tests; needs Docker running
+./mvnw test                                  # all 33 tests; needs Docker running
 ./mvnw -DexcludedGroups=integration test     # the 9 unit tests only; no Docker needed
 ```
 - **Unit tests:** the request normalisation, the reservation lifecycle rules and the decline codes.
 - **Integration tests** (tagged `integration`): run the real app against a real Postgres started with Testcontainers.
   - **Concurrency:** 100 users race for one seat, parallel requests from one user hit the limit, parallel retries share one key, and multi-seat requests overlap in opposite orders.
   - **API rules:** identity from the token, all-or-nothing, holds and expiry, ownership.
+  - **Metrics access:** only the configured credentials can read `/actuator/prometheus`.
 - **In the image build:** the unit tests run as part of every image build, so a failing rule stops a deploy.
 
 ## Metrics and logs
 
-**Metrics:** public, in Prometheus format, at `/actuator/prometheus`:
-```bash
-curl -s https://paytm-seat-selection.onrender.com/actuator/prometheus | grep -E '^(reservations_|seats_)'
-```
+### Metrics
+
+Prometheus format, at `/actuator/prometheus`. On the live service it's protected with HTTP Basic auth (`METRICS_USERNAME` / `METRICS_PASSWORD`), which is how Grafana's scraper reads it; the credentials are shared with reviewers on request. Locally, with no `METRICS_PASSWORD` set, it's open.
+
 | Metric | Meaning |
 |---|---|
 | `reservations_confirmed_total`, `reservations_held_total` | Reservations created |
@@ -178,16 +181,90 @@ curl -s https://paytm-seat-selection.onrender.com/actuator/prometheus | grep -E 
 | `reservations_released_total{reason}` | `cancelled`, `expired` |
 | `seats_available` / `seats_held` / `seats_confirmed` / `seats_capacity` `{show_id}` | Per-show seat counts, refreshed every second |
 | `reservations_holds_overdue` | Holds more than 10 s past expiry; should always be 0 |
+| `hikaricp_connections_active` / `_pending` | Database connections in use / requests waiting for one |
+| `process_cpu_usage` | Share of the CPU the app is using (0 to 1) |
 
-Counters reset when the instance restarts, e.g. after the free instance wakes up.
+**Setup (once per terminal):**
+```bash
+APP=https://paytm-seat-selection.onrender.com     # or http://localhost:8080
+MUSER=<metrics username>; MPASS=<metrics password>  # leave MPASS empty locally
 
-**Health:**
+# metrics [PATTERN] -> "name value" lines; with no pattern, all reservation and seat metrics
+metrics() {
+  local auth=(); [ -n "$MPASS" ] && auth=(-u "$MUSER:$MPASS")
+  curl -s "${auth[@]}" "$APP/actuator/prometheus" | grep -E "^(${1:-reservations_|seats_})" | awk '{ v = $2; if (v == int(v)) v = int(v); printf "%-70s %s\n", $1, v }'
+}
+```
+
+**Getting counts:**
+```bash
+metrics                                   # everything reservation- and seat-related
+metrics reservations_confirmed_total      # confirmations since the app started
+metrics reservations_declined_total       # declines, one line per reason
+metrics 'seats_.*show_id="<show-id>"'     # available / held / confirmed / capacity for one show
+metrics reservations_holds_overdue        # should be 0
+
+# Live view while a burst runs (in a second terminal)
+while true; do clear; metrics 'reservations_(confirmed|declined)_total|hikaricp_connections_(active|pending)|process_cpu_usage'; sleep 2; done
+```
+
+**Counts over one run:** the `_total` metrics only go up, so take a reading before and after, and subtract. `burst.sh` does this itself and checks the differences against the responses it received.
+
+Counters restart from 0 when the instance restarts, e.g. after the free instance wakes up. The seat gauges are read from the database, so they don't reset.
+
+### Health
+
 - `/actuator/health/liveness`: the app is running.
 - `/actuator/health/readiness`: the app can serve, including a live database check. It returns `503` within about 2 seconds if the database is unreachable.
 
-**Logs:** structured JSON, one line per request plus one per reservation decision. Every line carries a `request_id`, which is also returned in the `X-Request-Id` response header and in every error body.
-- **On Render:** the service's **Logs** tab.
-- **In Grafana Cloud (Loki):** when `SPRING_PROFILES_ACTIVE=loki` is set. Query with `{app="seat-selection"}`, then filter, e.g. `| logger="access" | http_status="500"` or `| request_id="<id>"`.
+### Logs
+
+Structured JSON, one line per request plus one per reservation decision. Every line carries a `request_id`, which is also returned in the `X-Request-Id` response header and in every error body.
+
+**On Render:** the service's **Logs** tab.
+
+**In Grafana Cloud (Loki),** when `SPRING_PROFILES_ACTIVE=loki` is set. The Grafana stack is private; access is shared on request.
+- **In the Grafana UI:** open the stack's Grafana → **Explore** → data source ending in **`-logs`** → set the time range → switch the query editor to **Code** → `{app="seat-selection"}`.
+- **From the command line:** Loki's HTTP API takes the same queries. You need a token with **logs:read**, which is different from the **logs:write** token the app uses.
+
+**Setup (once per terminal):**
+```bash
+U=<stack user number>                       # Grafana Cloud portal -> stack -> Loki -> Details -> User
+T=<read token>                              # a token with logs:read
+H=https://logs-prod-XXX.grafana.net         # Loki -> Details -> URL (host only)
+
+# loki QUERY [SINCE] [LIMIT] -> matching log lines, newest first
+loki() {
+  curl -s -u "$U:$T" -G "$H/loki/api/v1/query_range" \
+    --data-urlencode "query=$1" --data-urlencode "since=${2:-1h}" --data-urlencode "limit=${3:-20}" |
+    jq -r '.data.result[].values[][1]'
+}
+
+# loki_count QUERY -> one "group<TAB>count" line per group, for counting queries
+loki_count() {
+  curl -s -u "$U:$T" -G "$H/loki/api/v1/query" --data-urlencode "query=$1" |
+    jq -r '.data.result[] | "\(.metric | to_entries | map(.value) | join(","))\t\(.value[1])"'
+}
+```
+
+**Finding logs:**
+```bash
+curl -s -u "$U:$T" "$H/loki/api/v1/label/app/values"                       # which apps are sending logs
+loki '{app="seat-selection"}'                                              # the latest 20 lines
+loki '{app="seat-selection"} | request_id="<id>"'                          # one request, end to end
+loki '{app="seat-selection"} | logger="access" | http_status=~"5.."' 24h   # server errors, last 24 hours
+loki '{app="seat-selection"} |= "reserve declined"' 1h 10                  # recent declines
+loki '{app="seat-selection"} |= "hold expired"' 24h                        # holds released by the sweeper
+```
+
+**Counting:**
+```bash
+loki_count 'sum by (http_status) (count_over_time({app="seat-selection"} | logger="access" [1h]))'   # requests per status
+loki_count 'sum by (reason) (count_over_time({app="seat-selection"} |= "reserve declined" [1h]))'   # declines per reason
+```
+Right after a burst, the declines-per-reason numbers should match the burst's outcome summary.
+
+Fields such as `logger`, `http_status`, `http_path`, `request_id`, `outcome` and `reason` are attached to each line as metadata, so they can be filtered on directly without `| json`.
 
 ## Configuration
 
@@ -197,6 +274,7 @@ Everything is set with environment variables. The defaults suit local developmen
 |---|---|---|
 | `JWT_SECRET` | dev value | **Must be set in production:** at least 32 characters (e.g. `openssl rand -base64 48`) |
 | `ADMIN_API_KEY` | `dev-admin-key` | **Must be set in production:** protects `POST /shows` |
+| `METRICS_USERNAME`, `METRICS_PASSWORD` | `metrics`, (none) | Set a password to require HTTP Basic auth on `/actuator/prometheus` |
 | `DB_HOST`, `DB_PORT`, `DB_NAME` | `localhost`, `5432`, `seats` | Or a full JDBC URL in `DATABASE_URL` |
 | `DATABASE_USERNAME`, `DATABASE_PASSWORD` | `seats`, `seats` | |
 | `DB_POOL_SIZE` | `30` | Keep under your Postgres plan's connection limit |
@@ -216,6 +294,7 @@ For local Docker runs, the Loki values can go in a `.env` file next to `docker-c
 3. **Health check path:** `/actuator/health/readiness`.
 4. **Environment variables:**
    - `JWT_SECRET` and `ADMIN_API_KEY`
+   - `METRICS_USERNAME` and `METRICS_PASSWORD`, if Grafana will scrape the metrics
    - `DB_HOST`, `DB_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` from the database's **internal** connection details
    - the Loki variables, if you want logs in Grafana
 
