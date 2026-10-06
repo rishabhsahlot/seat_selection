@@ -13,6 +13,9 @@ services:
       ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key}
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-dev-only-secret-change-me}
       HOLD_TTL: ${HOLD_TTL:-120s}
+      # Set METRICS_PASSWORD to require HTTP Basic auth on /actuator/prometheus.
+      METRICS_USERNAME: ${METRICS_USERNAME:-metrics}
+      METRICS_PASSWORD: ${METRICS_PASSWORD:-}
       # To also ship logs to Grafana Cloud: set these in your shell or a .env file.
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-}
       LOKI_URL: ${LOKI_URL:-}

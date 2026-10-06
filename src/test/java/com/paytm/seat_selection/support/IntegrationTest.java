@@ -82,8 +82,7 @@ public abstract class IntegrationTest {
 		headers.forEach(request::header);
 		try {
 			HttpResponse<String> response = HTTP.send(request.build(), HttpResponse.BodyHandlers.ofString());
-			JsonNode json = response.body().isEmpty() ? JSON.nullNode() : JSON.readTree(response.body());
-			return new Response(response.statusCode(), json, response);
+			return new Response(response.statusCode(), parseJson(response.body()), response);
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException(method + " " + path + " failed", ex);
@@ -100,7 +99,17 @@ public abstract class IntegrationTest {
 		return name + "-" + this.testRun;
 	}
 
-	protected String token(String name) {
+	/** The body as JSON, or a null node for an empty or non-JSON body (e.g. the metrics page). */
+	private static JsonNode parseJson(String body) {
+		try {
+			return body.isEmpty() ? JSON.nullNode() : JSON.readTree(body);
+		}
+		catch (RuntimeException ex) {
+			return JSON.nullNode();
+		}
+	}
+
+		protected String token(String name) {
 		return send("POST", "/auth/token", null, Map.of("user_id", userId(name)), Map.of()).field("access_token");
 	}
 

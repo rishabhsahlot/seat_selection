@@ -18,6 +18,8 @@ set -uo pipefail
 BASE=${1:?usage: ./burst.sh <BASE_URL>}
 BASE=${BASE%/}
 ADMIN_API_KEY=${ADMIN_API_KEY:-dev-admin-key}
+METRICS_USERNAME=${METRICS_USERNAME:-metrics} # only needed if the service protects /actuator/prometheus
+METRICS_PASSWORD=${METRICS_PASSWORD:-}        # (that is, if METRICS_PASSWORD is set on the service)
 HOT_SEATS=${HOT_SEATS:-5}              # seats everyone fights over
 STORM=${STORM:-500}                    # users racing for each hot seat
 RETRY_KEYS=${RETRY_KEYS:-50}           # requests that get retried ...
@@ -57,6 +59,16 @@ in_parallel() {
 
 # How many result lines match a regex, e.g. count ' 201$'.
 count() { grep -cE "$1" "$WORK/results"; }
+
+# Saves the /actuator/prometheus page to FILE (with the metrics credentials, if given) and
+# prints the HTTP status.
+fetch_metrics() {
+	if [ -n "$METRICS_PASSWORD" ]; then
+		curl -s -o "$1" -w '%{http_code}' -u "$METRICS_USERNAME:$METRICS_PASSWORD" "$BASE/actuator/prometheus"
+	else
+		curl -s -o "$1" -w '%{http_code}' "$BASE/actuator/prometheus"
+	fi
+}
 
 # The value of one metric in a saved /actuator/prometheus page.
 metric() { awk -v name="$1" '$1 == name { print int($2) }' "$2"; }
@@ -124,7 +136,10 @@ export -f reserve mint
 # Fails early if the service is down, and saves the metrics to compare against later.
 check_ready() {
 	curl -sf --max-time 30 "$BASE/actuator/health/readiness" >/dev/null || fail "$BASE is not ready"
-	curl -s "$BASE/actuator/prometheus" >"$WORK/metrics.before"
+	local status
+	status=$(fetch_metrics "$WORK/metrics.before")
+	[ "$status" = 401 ] && fail "/actuator/prometheus needs credentials: set METRICS_USERNAME and METRICS_PASSWORD"
+	[ "$status" = 200 ] || fail "could not read /actuator/prometheus (HTTP $status)"
 }
 
 # Fills SEATS with A1 ... A50, B1 ... (ROWS rows of SEATS_PER_ROW seats).
@@ -226,7 +241,7 @@ collect_results() {
 	grep ' 201$' "$WORK/results" | cut -d' ' -f3 | tr , '\n' | sort >"$WORK/sold"
 	curl -s "$BASE/shows/$SID" | jq -r '.seats[] | select(.status == "confirmed") | .seat_name' | sort >"$WORK/confirmed"
 	sleep 2 # the seat gauges refresh every second
-	curl -s "$BASE/actuator/prometheus" >"$WORK/metrics.after"
+	fetch_metrics "$WORK/metrics.after" >/dev/null
 }
 
 # How many requests of each scenario got each outcome.

@@ -14,28 +14,63 @@ import tools.jackson.databind.json.JsonMapper;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
 import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.util.StringUtils;
 
 @Configuration
 public class SecurityConfig {
+
+	/**
+	 * {@code /actuator/prometheus} has its own chain, checked first: HTTP Basic auth when
+	 * METRICS_PASSWORD is set (Grafana's scraper sends it on every request), open when it
+	 * isn't (local development).
+	 */
+	@Bean
+	@Order(1)
+	SecurityFilterChain metricsFilterChain(HttpSecurity http, AppProperties props) throws Exception {
+		http.securityMatcher("/actuator/prometheus")
+				.csrf(csrf -> csrf.disable())
+				.sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS));
+		if (StringUtils.hasText(props.metricsPassword())) {
+			PasswordEncoder encoder = PasswordEncoderFactories.createDelegatingPasswordEncoder();
+			UserDetails scraper = User.withUsername(props.metricsUsername())
+					.password(encoder.encode(props.metricsPassword()))
+					.roles("METRICS")
+					.build();
+			http.authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+					.httpBasic(Customizer.withDefaults())
+					.userDetailsService(new InMemoryUserDetailsManager(scraper));
+		}
+		else {
+			http.authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
+		}
+		return http.build();
+	}
 
 	@Bean
 	SecurityFilterChain securityFilterChain(HttpSecurity http, JsonMapper json) throws Exception {
 		http.csrf(csrf -> csrf.disable())
 				.sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 				.authorizeHttpRequests(auth -> auth
-						.requestMatchers("/actuator/health/**", "/actuator/prometheus", "/actuator/info", "/error")
+						.requestMatchers("/actuator/health/**", "/actuator/info", "/error")
 						.permitAll()
 						.requestMatchers(HttpMethod.POST, "/auth/token").permitAll()
 						// Admin endpoint: guarded by X-Admin-Key in the controller, not by user tokens.
